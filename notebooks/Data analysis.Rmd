@@ -1,0 +1,231 @@
+---
+title: "Synthetic Data Analysis"
+output: html_notebook
+---
+
+## Interview Healthcare Data Scientist - NHS Trust Plymouth
+
+The synthetic data mimics a real Referral to Treatment (RTT) dataset, where patients are referred to the Trust for treatment. Patients are assigned the next available appointment with a healthcare professional, based on their clinical need and wait time, such that patients who have a greater clinical risk and those who have been waiting longest are seen first.
+
+The data is composed of the patient's age, the index of multiple deprivation of their home address, the patient's ethnicity, the date the patient was seen by a healthcare professional and the date that they were referred to be seen.
+
+The Index of Multiple Deprivation (IMD) is an aggregated combination of 37 separate indicators relative deprivation for small areas (Lower Super Output Areas (LSOAs)). They provide means of comparing whether one area is more deprived than another. The result is a ranking where the LSOAs are sorted from the most deprived to the least one. In this dataset, the IMD is discretised to 1st to 10th deciles.
+
+### Importing libraries and loading data
+
+```{r}
+library(janitor)
+library(tidyverse)
+library(readxl)
+library(lubridate)
+library(ggplot2)
+library(GGally)
+
+data = read_excel("..\\data\\raw\\SyntheticData.xlsx",                                             sheet="SyntheticRTTData",
+                    na=c("","NULL","NA"),
+                    .name_repair = make_clean_names)
+
+data = data %>% 
+  mutate(index_of_multiple_deprivation = factor(index_of_multiple_deprivation,
+                                                levels = seq(1,10)),
+         ethnicity = factor(ethnicity))
+```
+
+### First look to raw data
+
+We can check if data was loaded right, the columns types are as expected and if there is any missings. We can have a look to the first rows of the data. With 'funModeling' package we can check the types, occurence of ceros and occurence of missings.
+
+But first, it is recommended to check whether there are possible duplicates in the data and if it is legit. We can see we have found 229 unique rows which are duplicated. This rows comprises a total of 463 rows in the dataset.
+
+However, because the dataset is synthetic and the nature of the variables are not super specific to individuals, we can't just discard there are coincidences. In a real dataset, if we know how big is the scope of the population, we could perform some tests to compute the likehood of this duplicates.
+
+```{r}
+data %>% get_dupes()
+
+# number of unique rows duplicated
+data %>% get_dupes() %>% distinct()
+```
+
+As we can seen, just in the first rows we can notice a missing in 'wait_start_date'. There are a few missings for different rows in the data, as the function 'status()' shows. We can also return the 16 rows with missing values. Generally, due to the small proportion of rows with missing values, we could directly eliminate them.
+
+For the variables with dates, trying to impute their values could be hard, and being ony 7 of 8015 samples, we can remove them without significantly reducing the accuracy of our analysis.
+
+```{r}
+head(data)
+
+funModeling::status(data)
+
+ind = which(is.na(data), arr.ind=TRUE)
+
+data[ind[1:16],]
+```
+
+### Data wrangling
+
+Therefore, we delete samples with missing values. Also, we calculate the period in days between these columns.
+
+```{r}
+data = data %>% tidyr::drop_na() %>% 
+  mutate(waiting_days = interval(wait_start_date,seen_date)/days(1))
+```
+
+### Visualization
+
+Then, we can visualise the distribution. Ideally, we might find some inequities related to the 'start_waiting_date', without affecting the descriptive variables of the population.
+
+```{r}
+data %>% 
+  GGally::ggpairs(columns=c('seen_date', 'wait_start_date', 'waiting_days'),
+                  lower = list(continuous = GGally::wrap("smooth", alpha = 0.5)),
+                  diag = list(continuous = GGally::wrap("densityDiag", alpha=0.5))
+                  )
+```
+
+Observing the distribution and the relation of the different dates, we can see there are negative values for the 'waiting_days' period, which could be due to an error in the collecion of data. The dataset seems to comprise appoitments one or some clinicians had during January 2022. The 'wait_start_date' values for samples with negative period could be due to an error introducing the year or month.
+
+Also, we can see there is one 'waiting' date since the year 2010, which is highly unlikely; another in 2017 and a sequence of dates beginning in 2018. The appointment dates seems characteristics to time series features with a week seasonal variation.
+
+```{r}
+# First and last succesful appointments
+sprintf('The first clinican appointment: %s', min(data$seen_date))
+sprintf('The last clinican appointment: %s', max(data$seen_date))
+
+# Count of years
+data %>% count(year(wait_start_date))
+
+data = data %>% filter(waiting_days >= 0, waiting_days < 3000)
+```
+
+Ethnicity is a multi-level factor variable where apart from the 2 missings values, we can find uncertainty categories such as "Unknown" and "Unwilling to answer". Also, there might be some categories without enough representation. We could apply imputation methods based on DAGs to evaluate the likelihood of different strata of population to not answer, however this approach is beyond the scope of the excercise and probably we don't have enough data.
+
+To have categories with enough data, we could aggregate the ethnicity categories to a higher level. However, this approach might introduce some bias.
+
+1.  White british
+2.  White - Irish / Other: White Irish, White - Others ...
+3.  Black ethnicities
+4.  Mixed ethnicities
+5.  Unknown / Unwilling: Unknown, Unwilling to answer, missings
+6.  Other ethnicities
+7.  Asian ethnicities: Asian ethnicities, Chinese
+
+```{r}
+data %>% count(ethnicity)
+
+ethn_levels = data.frame(
+  ethnicity = unique(data$ethnicity),
+  agg_ethn = factor(c("White British","Black", "White - Irish or other", "Other ethn", "Unkown/Unwilling", "Unkown/Unwilling", "Mixed", "White - Irish or other", "Asian","Asian", "Mixed", "Black", "Mixed", "Black", "Asian", "Mixed"))
+)
+
+data = data %>% left_join(ethn_levels, by="ethnicity")
+
+data %>% count(agg_ethn)
+```
+
+Also, this correlation could be based on a cofounder with the descriptive variables. But first, we need to evaluate how ethnicities and IMD correlate. We can expect that their correlation has effect in possible inequalities and it is difficult to separe them. If there are not relationship between ethnicity and IMD deciles, we should expect some uniform distributions.
+
+```{r}
+data %>% 
+    ggplot(aes(y = as.numeric(index_of_multiple_deprivation), fill = agg_ethn)) +
+   geom_histogram(binwidth = 1, colour='black') + facet_wrap(~agg_ethn, ncol = 7, scales = 'free_x') +
+  theme_bw() + 
+  theme(legend.position="none")
+```
+
+We've seen that the distribution more similar to a uniform one is the IMD for White - British. But generally, we can see an unfair distribution in deciles. The ones more noteworthy are the distribution for Asian, Black, Mixed and Withe Irish communities.
+
+```{r}
+pm = data %>% 
+  ggbivariate(outcome = "waiting_days", 
+              explanatory = c('patient_age','index_of_multiple_deprivation','agg_ethn'),
+              ggplot2::aes(colour=agg_ethn, alpha=0.5)) +
+  theme_bw()
+
+# Eliminate the categorization IMD + ethnicity
+pm[2,1] = data %>% tidyr::drop_na(index_of_multiple_deprivation) %>% 
+  ggplot(aes(x = waiting_days, y = index_of_multiple_deprivation)) + geom_boxplot()
+
+pm
+```
+
+With bivariate analysis, we can visualize there might be some inequalities.
+
+-   The distribution of number of days waiting based on the age seem to be partially uniform (apart from the extreme values from the Poisson distribution). However, the youngest patients wait less time. Althought in a real dataset could be some reasons based on the interval ages and the specific population, this effect might be due to the intrinsic distribution of 'patient age' combined with a Poisson distribution for the dates. Therefore, it seems there aren't high inequalities based on age.
+
+    ```{r}
+    data %>% ggplot(aes(x = patient_age)) + geom_histogram(binwidth = 1, color = "black", fill = "white") + theme_bw()
+    ```
+
+-   The distribution of the waiting period based on the aggregated level of ethnicity shows which may be some inequalities. We can see the largest boxplot is for Asian ethnicity and the highest medians belong to Asian, Black and Mixed ethnicities. As well, we can identify the waiting period for the black community is biased, with a minimal waiting time similar to the median of the other communities.
+
+-   Disaggregatting the ethnicities by the deprivation deciles we can confirm our suspicions looking to boxplots in 1st and 5th IMD deciles.
+
+    ```{r}
+    data %>% 
+      ggplot(aes(x = waiting_days, y = index_of_multiple_deprivation, fill = agg_ethn)) +
+      geom_violin(scale="width") +
+      theme_bw()
+    ```
+
+-   The extreme values related to White - British ethnicity is due to the Poisson distribution and the high number of samples in this category. In a real context, it could be interesting to relate this with diagnoses codes.
+
+```{r}
+
+pm2 = data %>% 
+  GGally::ggpairs(columns=c('patient_age','index_of_multiple_deprivation','agg_ethn', 'waiting_days'),
+                  lower = list(continuous = GGally::wrap("points",alpha=0.3),
+                               combo = GGally::wrap("box",na.rm = TRUE)),
+                  diag = list(continuous = GGally::wrap("densityDiag", alpha=0.5)),
+                  upper = list(discrete =  GGally::wrap("crosstable"),
+                               combo = GGally::wrap("summarise_by", size=2)),
+                  ggplot2::aes(colour=agg_ethn),
+                  progress = FALSE
+                  ) +
+  theme_bw()
+
+pm2[2,1] = data %>% 
+  ggplot(aes(x = patient_age, 
+             y = index_of_multiple_deprivation,
+             fill = agg_ethn)) +
+  geom_boxplot() + theme_bw()
+
+pm2
+  
+
+data %>% group_by(agg_ethn) %>%  mutate(agg = paste(agg_ethn,'-',n())) %>% 
+  ggplot(aes(x = waiting_days, fill = agg)) +
+  geom_density(alpha = 0.3) + theme_bw()
+```
+
+Summary statistics for waiting times based on IMD deciles and ethnicity
+
+```{r}
+sts = function(serie){
+  med = median(serie)
+  q1 = quantile(serie,0.25)
+  q3 = quantile(serie,0.75)
+  nn = length(serie)
+  
+  result = paste0(med,' [',q1,'-',q3,'] n = ',nn)
+  return(result)
+}
+
+
+data %>% group_by(index_of_multiple_deprivation, agg_ethn) %>% 
+  summarise(result = sts(waiting_days)) %>% 
+  pivot_wider(names_from = agg_ethn, values_from = result) %>% 
+  rename(IMD = index_of_multiple_deprivation)
+```
+
+Also, we could perform
+
+Based on previous visualizations, there might been some inequalitis for 1. Black, Asian and Mixed?¿?¿
+
+-   Poisson estimates for Black, Asian, Mixed, Other, Irish
+
+-   Poisson estimates for 1, 2, 5, 8+9+10
+
+-   Compare Poisson white 1 vs black + asian 1 vs irish 1?¿
+
+-   statistical power
+
+We could compute a statistical test to compare Poisson distributions, for example comparing
